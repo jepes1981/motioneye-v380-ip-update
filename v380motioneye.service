@@ -1,0 +1,16 @@
+# This service unit is for v380 motioneye timer unit
+# By Jepes
+# Licensed under GPL V2
+#
+
+[Unit]
+Description=Check if v380 ip is updated in motioneye
+Wants=v380motioneye.timer
+
+[Service]
+Type=simple
+ExecStart=<path>/v380motioneye.sh
+#ExecStart=/usr/bin/lsblk
+
+[Install]
+WantedBy=multi-user.target
