@@ -1,0 +1,17 @@
+# This timer unit is for monitoring v380 ip for motioneye
+# By David Both
+# Licensed under GPL V2
+#
+
+[Unit]
+Description=Check if v380 ip is updated in motioneye
+Requires=v380motioneye.service
+
+[Timer]
+Unit=v380motioneye.service
+#OnCalendar=*-*-* *:05:00
+OnBootSec=1min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
