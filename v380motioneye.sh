@@ -1,100 +1,71 @@
 #!/bin/bash
+#set -x  # enable for debugging
 
 # ---------------------- VARIABLES ----------------------
-V380_MAC='AA:BB:CC:DD:EE:FF'
-CONFIG_FILE='<path to camera config in motioneye>/camera-1.conf'
-PREVIOUS_IP_FILE='<your preferred path>/v380ip.txt'
+V380_MAC='20:98:ED:63:18:39'
+CONFIG_FILE='/home/jepes/motioneye/etc/motioneye/camera-1.conf'
 
 # ---------------------- FUNCTIONS ----------------------
-
-# Function to print error and exit
 error_exit() {
-    echo "[ERROR] $1"
+    echo "[ERROR] $1" >&2
     exit 1
 }
 
-# Function to print info messages
 log_info() {
     echo "[INFO] $1"
 }
 
 # ---------------------- MAIN SCRIPT ----------------------
+# Ensure config file exists
+[ -f "$CONFIG_FILE" ] || error_exit "Configuration file not found: $CONFIG_FILE"
 
-# Check if previous IP file exists
-if [ ! -f "$PREVIOUS_IP_FILE" ]; then
-    error_exit "Previous IP file not found: $PREVIOUS_IP_FILE"
-fi
+# Extract IP from config
+CURRENT_CONFIG_IP=$(grep -E '^netcam_url' "$CONFIG_FILE" \
+                   | sed -nE 's|netcam_url rtsp://([^:/]+).*|\1|p')
+[ -n "$CURRENT_CONFIG_IP" ] || error_exit "Failed to parse current IP from config"
+log_info "Configured IP from config: $CURRENT_CONFIG_IP"
 
-# Check if config file exists
-if [ ! -f "$CONFIG_FILE" ]; then
-    error_exit "Camera config file not found: $CONFIG_FILE"
-fi
+# Check for root privileges
+[[ $EUID -ne 0 ]] && error_exit "Script must be run as root for network scan"
 
-# Extract current netcam_url IP
-CURRENT_CONFIG_IP=$(grep "^netcam_url" "$CONFIG_FILE" | sed -nE 's|netcam_url rtsp://([^/]+)/|\1|p')
-PREVIOUS_IP=$(cat "$PREVIOUS_IP_FILE" | tr -d ' \n')
+# Perform network scan to find camera's actual IP
+log_info "Scanning network for camera MAC $V380_MAC..."
+NMAP_OUT=$(nmap -Pn -p 554 --open 192.168.1.0/24 2>/dev/null)
 
-log_info "Configured IP from config file: $CURRENT_CONFIG_IP"
-log_info "Previous IP from file: $PREVIOUS_IP"
-
-# Compare IPs
-if [ "$CURRENT_CONFIG_IP" == "$PREVIOUS_IP" ]; then
-    log_info "All is well. IPs match."
-    exit 0
-fi
-
-# Check for root
-if [[ $EUID -ne 0 ]]; then
-    error_exit "This script must be run as root."
-fi
-
-log_info "Running as root. Proceeding with nmap scan..."
-
-# Scan the network for RTSP (port 554)
-NMAP_OUTPUT=$(nmap -oN - -p 554 --open 192.168.1.1/24 2>/dev/null)
-
-log_info "Nmap scan completed. Searching for MAC: $V380_MAC"
-
-# Extract the IP corresponding to the MAC
-V380_NEW_IP=""
-current_ip=""
-
+# Parse scan results
+ACTUAL_IP=""
+CURRENT_SCAN_IP=""
 while IFS= read -r line; do
     if [[ $line =~ ^Nmap\ scan\ report\ for\ ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) ]]; then
-        current_ip="${BASH_REMATCH[1]}"
+        CURRENT_SCAN_IP="${BASH_REMATCH[1]}"
     elif [[ $line =~ MAC\ Address:\ ([0-9A-Fa-f:]{17}) ]]; then
-        mac="${BASH_REMATCH[1]}"
-        if [[ "$mac" == "$V380_MAC" ]]; then
-            V380_NEW_IP="$current_ip"
+        if [[ "${BASH_REMATCH[1]}" == "$V380_MAC" ]]; then
+            ACTUAL_IP="$CURRENT_SCAN_IP"
             break
         fi
     fi
-done <<< "$NMAP_OUTPUT"
+done <<< "$NMAP_OUT"
 
-# Check if IP was found
-if [ -z "$V380_NEW_IP" ]; then
-    error_exit "V380 camera IP for MAC $V380_MAC not found in network scan."
+[ -n "$ACTUAL_IP" ] || error_exit "Could not find camera IP via nmap"
+log_info "Detected actual camera IP: $ACTUAL_IP"
+
+# Compare config IP vs actual IP
+if [[ "$CURRENT_CONFIG_IP" == "$ACTUAL_IP" ]]; then
+    log_info "Configured IP matches actual IP. No update needed."
+    exit 0
 fi
 
-log_info "Found new IP for V380 camera: $V380_NEW_IP"
-log_info "Updating netcam_url in config file..."
+# Backup, update config, restart service
+log_info "IP mismatch: updating config from $CURRENT_CONFIG_IP to $ACTUAL_IP"
+cp "$CONFIG_FILE" "${CONFIG_FILE}.bak" || error_exit "Backup failed"
 
-# Backup original config
-cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
+sed -i -E "s|^(netcam_url rtsp://)[^:/]+|\1$ACTUAL_IP|" "$CONFIG_FILE" \
+    || error_exit "Failed to update config"
 
-# Update netcam_url line
-sed -i -E "s|^(netcam_url rtsp://)[^/]+/|\1$V380_NEW_IP/|" "$CONFIG_FILE"
+log_info "Configuration updated successfully"
 
-# Save new IP to previous IP file
-echo "$V380_NEW_IP" > "$PREVIOUS_IP_FILE"
+# Restart MotionEye
+docker restart motioneye || error_exit "Failed to restart motioneye container"
 
-log_info "Configuration updated successfully. New IP: $V380_NEW_IP"
-
-#restart motioneye docker
-docker restart motioneye
-if [ $? -ne 0 ]; then
-  echo "Error restarting motioneye docker."
-  exit 1
-fi
-
+log_info "Script completed. New IP is now $ACTUAL_IP"
 exit 0
